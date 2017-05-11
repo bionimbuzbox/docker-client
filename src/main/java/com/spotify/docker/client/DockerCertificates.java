@@ -22,10 +22,11 @@ package com.spotify.docker.client;
 
 import com.google.common.base.Optional;
 import com.spotify.docker.client.exceptions.DockerCertificateException;
-
-import java.io.BufferedReader;
+import java.io.ByteArrayInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.Reader;
+import java.io.StringReader;
 import java.nio.charset.Charset;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -44,10 +45,8 @@ import java.security.spec.InvalidKeySpecException;
 import java.security.spec.PKCS8EncodedKeySpec;
 import java.util.ArrayList;
 import java.util.List;
-
 import javax.net.ssl.HostnameVerifier;
 import javax.net.ssl.SSLContext;
-
 import org.apache.http.conn.ssl.NoopHostnameVerifier;
 import org.apache.http.ssl.SSLContexts;
 import org.bouncycastle.asn1.pkcs.PrivateKeyInfo;
@@ -76,22 +75,31 @@ public class DockerCertificates implements DockerCertificatesStore {
   }
 
   private DockerCertificates(final Builder builder) throws DockerCertificateException {
+    boolean readFromFile = true;
+    
     if ((builder.caCertPath == null) || (builder.clientCertPath == null)
         || (builder.clientKeyPath == null)) {
-      throw new DockerCertificateException(
-          "caCertPath, clientCertPath, and clientKeyPath must all be specified");
+      readFromFile = false;
     }
-
+    
     try {
-
-      final PrivateKey clientKey = readPrivateKey(builder.clientKeyPath);
-      final List<Certificate> clientCerts = readCertificates(builder.clientCertPath);
-
+      final PrivateKey clientKey;
+      final List<Certificate> clientCerts;
+      final List<Certificate> caCerts;
+      
+      if (readFromFile) {
+        clientKey = readPrivateKey(builder.clientKeyPath);
+        clientCerts = readCertificates(builder.clientCertPath);
+        caCerts = readCertificates(builder.caCertPath);
+      } else {
+        clientKey = readPrivateKey(builder.clientKeyContent);
+        clientCerts = readCertificates(builder.clientCertContent);
+        caCerts = readCertificates(builder.caCertContent);
+      }
+      
       final KeyStore keyStore = newKeyStore();
       keyStore.setKeyEntry("key", clientKey, KEY_STORE_PASSWORD,
               clientCerts.toArray(new Certificate[clientCerts.size()]));
-
-      final List<Certificate> caCerts = readCertificates(builder.caCertPath);
 
       final KeyStore trustStore = newKeyStore();
       for (Certificate caCert : caCerts) {
@@ -122,11 +130,24 @@ public class DockerCertificates implements DockerCertificatesStore {
     keyStore.load(null);
     return keyStore;
   }
-
+  
   private PrivateKey readPrivateKey(Path file) throws IOException, InvalidKeySpecException,
+  NoSuchAlgorithmException, DockerCertificateException {
+    try (Reader reader = Files.newBufferedReader(file, Charset.defaultCharset())) {
+      return readPrivateKey(reader);
+    }
+  }
+  
+  private PrivateKey readPrivateKey(String content) throws IOException, InvalidKeySpecException,
+  NoSuchAlgorithmException, DockerCertificateException {
+    try (Reader reader = new StringReader(content)) {
+      return readPrivateKey(reader);
+    }
+  }
+
+  private PrivateKey readPrivateKey(Reader reader) throws IOException, InvalidKeySpecException,
       NoSuchAlgorithmException, DockerCertificateException {
-    try (BufferedReader reader = Files.newBufferedReader(file, Charset.defaultCharset());
-         PEMParser pemParser = new PEMParser(reader)) {
+    try (PEMParser pemParser = new PEMParser(reader)) {
 
       final Object readObject = pemParser.readObject();
 
@@ -137,8 +158,7 @@ public class DockerCertificates implements DockerCertificatesStore {
         return generatePrivateKey((PrivateKeyInfo) readObject);
       }
 
-      throw new DockerCertificateException("Can not generate private key from file: "
-          + file.toString());
+      throw new DockerCertificateException("Can not generate private key reader");
     }
   }
 
@@ -151,9 +171,19 @@ public class DockerCertificates implements DockerCertificatesStore {
 
   private List<Certificate> readCertificates(Path file) throws CertificateException, IOException {
     try (InputStream inputStream = Files.newInputStream(file)) {
-      final CertificateFactory cf = CertificateFactory.getInstance("X.509");
-      return new ArrayList<>(cf.generateCertificates(inputStream));
+      return readCertificates(inputStream);
     }
+  }
+  
+  private List<Certificate> readCertificates(String content) throws CertificateException, IOException {
+    try (InputStream inputStream = new ByteArrayInputStream(content.getBytes())) {
+      return readCertificates(inputStream);
+    }
+  }
+  
+  private List<Certificate> readCertificates(InputStream inputStream) throws CertificateException, IOException {
+    final CertificateFactory cf = CertificateFactory.getInstance("X.509");
+    return new ArrayList<>(cf.generateCertificates(inputStream));
   }
 
   public SSLContext sslContext() {
@@ -192,6 +222,9 @@ public class DockerCertificates implements DockerCertificatesStore {
     private Path caCertPath;
     private Path clientKeyPath;
     private Path clientCertPath;
+    private String caCertContent;
+    private String clientKeyContent;
+    private String clientCertContent;
 
     public Builder dockerCertPath(final Path dockerCertPath) {
       this.caCertPath = dockerCertPath.resolve(DEFAULT_CA_CERT_NAME);
@@ -214,6 +247,21 @@ public class DockerCertificates implements DockerCertificatesStore {
       this.clientCertPath = clientCertPath;
       return this;
     }
+    
+    public Builder caCertContent(final String caCertContent) {
+      this.caCertContent = caCertContent;
+      return this;
+    }
+
+    public Builder clientKeyContent(final String clientKeyContent) {
+      this.clientKeyContent = clientKeyContent;
+      return this;
+    }
+
+    public Builder clientCertContent(final String clientCertContent) {
+      this.clientCertContent = clientCertContent;
+      return this;
+    }
 
     public Builder sslFactory(final SslContextFactory sslContextFactory) {
       this.sslContextFactory = sslContextFactory;
@@ -221,17 +269,21 @@ public class DockerCertificates implements DockerCertificatesStore {
     }
 
     public Optional<DockerCertificatesStore> build() throws DockerCertificateException {
+      if (this.caCertContent != null && this.clientKeyContent != null
+          && this.clientCertContent != null) {
+        return Optional.of((DockerCertificatesStore) new DockerCertificates(this));
+      }
       if (this.caCertPath == null || this.clientKeyPath == null || this.clientCertPath == null) {
         log.debug("caCertPath, clientKeyPath or clientCertPath not specified, not using SSL");
         return Optional.absent();
       } else if (Files.exists(this.caCertPath) && Files.exists(this.clientKeyPath)
                  && Files.exists(this.clientCertPath)) {
         return Optional.of((DockerCertificatesStore) new DockerCertificates(this));
-      } else {
-        log.debug("{}, {} or {} does not exist, not using SSL", this.caCertPath, this.clientKeyPath,
-                  this.clientCertPath);
-        return Optional.absent();
       }
+      
+      log.debug("{}, {} or {} does not exist, not using SSL", this.caCertPath, this.clientKeyPath,
+                  this.clientCertPath);
+      return Optional.absent();
     }
   }
 }

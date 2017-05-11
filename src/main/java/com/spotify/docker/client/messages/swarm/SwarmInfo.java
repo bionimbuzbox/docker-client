@@ -29,11 +29,13 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.google.auto.value.AutoValue;
 import com.google.common.collect.ImmutableList;
 import java.util.Date;
+import javax.annotation.Nullable;
 
 @AutoValue
 @JsonAutoDetect(fieldVisibility = ANY, getterVisibility = NONE, setterVisibility = NONE)
 public abstract class SwarmInfo {
 
+  @Nullable
   @JsonProperty("Cluster")
   public abstract SwarmCluster cluster();
   
@@ -55,6 +57,7 @@ public abstract class SwarmInfo {
   @JsonProperty("Nodes")
   public abstract int nodes();
   
+  @Nullable
   @JsonProperty("RemoteManagers")
   public abstract ImmutableList<RemoteManager> remoteManagers();
 
